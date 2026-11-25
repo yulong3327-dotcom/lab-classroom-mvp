@@ -1,5 +1,6 @@
 import * as THREE from './lab/vendor/three-r160/three.module.min.js';
 import { createClassroom } from './scene.js';
+import { createWalker } from './movement.js';
 
 const el = id => document.getElementById(id);
 const room = el('classroom');
@@ -30,8 +31,10 @@ function startClassroom() {
   renderer.toneMappingExposure = 1.16;
   const scene = new THREE.Scene();
   const { benches, obstacles } = createClassroom(scene);
+  const { player, jump, advance } = createWalker(obstacles);
   const camera = new THREE.PerspectiveCamera(58, 1, 0.05, 52);
-  camera.position.set(0, 1.62, 6.12);
+  let eye = 1.62;
+  camera.position.set(player.x, eye, player.z);
   camera.rotation.order = 'YXZ';
   let yaw = 0;
   let pitch = -0.105;
@@ -41,6 +44,11 @@ function startClassroom() {
   let inputMode = 'auto';
   let touchMode = coarse.matches;
   room.dataset.touch = String(touchMode);
+  const sizeButtons = [...help.querySelectorAll('[data-size]')];
+  let controlSize = 'standard';
+  try { controlSize = localStorage.getItem('lab-control-size') || controlSize; } catch { /* Storage is optional. */ }
+  if (!sizeButtons.some(button => button.dataset.size === controlSize)) controlSize = 'standard';
+  setControlSize(controlSize);
 
   const ray = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
@@ -57,18 +65,30 @@ function startClassroom() {
     return [bench, edges];
   }));
   const keys = new Set();
-  const controls = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+  const controls = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'KeyC', 'Space', 'ShiftLeft', 'ShiftRight', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
   const move = new THREE.Vector2();
   const stick = new THREE.Vector2();
   const clamp = THREE.MathUtils.clamp;
   let aimPointer = null;
   let lookDrag = null;
   let joystickPointer = null;
+  let joystickOrigin = null;
+  let lastForwardTap = -Infinity;
+  let forwardBurst = false;
+  let touchSprint = false;
+  const jumpButton = el('jump');
+  const sprintButton = el('sprint');
   let width = 1, height = 1;
 
   function resize() {
+    const oldWidth = width, oldHeight = height;
     ({ width, height } = room.getBoundingClientRect());
     if (!width || !height) return;
+    if (oldWidth !== width || oldHeight !== height) {
+      if (joystickPointer !== null) resetJoystick();
+      lookDrag = null;
+      aimPointer = null;
+    }
     camera.aspect = width / height;
     camera.fov = Math.max(55, Math.min(101, 2 * Math.atan(Math.tan(58 * Math.PI / 360) / camera.aspect) * 180 / Math.PI));
     camera.updateProjectionMatrix();
@@ -84,6 +104,9 @@ function startClassroom() {
   }
   function stopInput() {
     keys.clear();
+    lastForwardTap = -Infinity;
+    forwardBurst = false;
+    setTouchSprint(false);
     lookDrag = null;
     aimPointer = null;
     resetJoystick();
@@ -97,7 +120,7 @@ function startClassroom() {
   document.addEventListener('pointerlockchange', () => { aimPointer = null; });
 
   function distance(bench) { return Math.hypot(camera.position.x - bench.x, camera.position.z - bench.z); }
-  function near(bench) { return distance(bench) < 2.75; }
+  function near(bench) { return player.grounded && distance(bench) < 2.75; }
   function cast(pos) {
     camera.updateMatrixWorld();
     ray.setFromCamera(pos, camera);
@@ -110,6 +133,7 @@ function startClassroom() {
     return new THREE.Vector2(2 * (x - rect.left) / rect.width - 1, 1 - 2 * (y - rect.top) / rect.height);
   }
   function chooseStation() {
+    if (!player.grounded) return null;
     const centerTarget = cast(pointer.set(0, 0));
     if (centerTarget) return centerTarget;
     if (aimPointer && !document.pointerLockElement) {
@@ -139,6 +163,7 @@ function startClassroom() {
     canvas.style.cursor = target && !locked && !touchMode ? 'crosshair' : '';
     if (target) {
       el('station-name').textContent = stations[target.id].name;
+      room.style.setProperty('--target-color', stations[target.id].accent);
       el('station-mouse').toggleAttribute('hidden', touchMode);
       el('interact').setAttribute('aria-label', `进入${stations[target.id].name}`);
     }
@@ -156,7 +181,7 @@ function startClassroom() {
   }
 
   function openStation(bench, push = true) {
-    if (!bench || active) return;
+    if (!bench || active || (push && !player.grounded)) return;
     active = bench;
     handoffInput();
     el('load-error').hidden = true;
@@ -190,7 +215,18 @@ function startClassroom() {
     if (!content || content.URL === 'about:blank') return;
     el('load-error').hidden = Boolean(content.querySelector('canvas'));
   });
-  el('interact').addEventListener('click', () => openStation(selected));
+  function bindAction(button, act) {
+    // A second finger can press an action while the first keeps the joystick held.
+    button.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      act();
+    });
+    button.addEventListener('click', event => { if (event.detail === 0) act(); });
+  }
+  bindAction(el('interact'), () => openStation(selected));
+  bindAction(jumpButton, () => { if (!active && !help.open) jump(); });
+  bindAction(sprintButton, () => setTouchSprint(!touchSprint));
   el('controls').addEventListener('click', () => { handoffInput(); help.showModal(); });
   el('close-help').addEventListener('click', () => help.close());
   const modeButtons = [...help.querySelectorAll('[data-mode]')];
@@ -200,21 +236,48 @@ function startClassroom() {
     for (const item of modeButtons) item.setAttribute('aria-pressed', String(item === button));
     help.close();
   });
+  for (const button of sizeButtons) button.addEventListener('click', () => {
+    resetJoystick();
+    setControlSize(button.dataset.size);
+    try { localStorage.setItem('lab-control-size', controlSize); } catch { /* Storage is optional. */ }
+    help.close();
+  });
+  coarse.addEventListener('change', event => { if (inputMode === 'auto') setTouch(event.matches); });
 
+  function setControlSize(value) {
+    controlSize = value;
+    room.dataset.size = value;
+    for (const item of sizeButtons) item.setAttribute('aria-pressed', String(item.dataset.size === value));
+  }
   function setTouch(value) {
     if (value === touchMode) return;
     touchMode = value;
     room.dataset.touch = String(value);
+    if (!value) { resetJoystick(); setTouchSprint(false); }
+  }
+  function setTouchSprint(value) {
+    touchSprint = value;
+    sprintButton.setAttribute('aria-pressed', String(value));
   }
   function keyDown(event) {
-    if (active || help.open || !controls.has(event.code) || (event.target instanceof HTMLButtonElement && event.code === 'KeyE')) return;
+    if (active || help.open || !controls.has(event.code)) return;
+    if (event.code === 'Space' && event.target instanceof HTMLButtonElement) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     event.preventDefault();
     keys.add(event.code);
+    if (event.code === 'Space' && !event.repeat) jump();
+    if (event.code === 'KeyW' && !event.repeat) {
+      const now = performance.now();
+      forwardBurst = now - lastForwardTap < 300;
+      lastForwardTap = now;
+    }
     if (event.code === 'KeyE' && !event.repeat) openStation(chooseStation());
   }
   window.addEventListener('keydown', keyDown);
-  window.addEventListener('keyup', event => keys.delete(event.code));
+  window.addEventListener('keyup', event => {
+    keys.delete(event.code);
+    if (event.code === 'KeyW') forwardBurst = false;
+  });
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('mousemove', event => {
     if (document.pointerLockElement === canvas) changeLook(event.movementX, event.movementY, 0.00215);
@@ -265,22 +328,34 @@ function startClassroom() {
   canvas.addEventListener('lostpointercapture', cancelLook);
 
   const joystick = el('joystick');
+  const knob = el('stick');
   function updateJoystick(event) {
-    const rect = joystick.getBoundingClientRect();
-    stick.set(event.clientX - rect.left - rect.width / 2, event.clientY - rect.top - rect.height / 2).clampLength(0, 34);
-    el('stick').style.transform = `translate(calc(-50% + ${stick.x}px), calc(-50% + ${stick.y}px))`;
-    stick.divideScalar(34);
+    const { x, y, travel } = joystickOrigin;
+    stick.set(event.clientX - x, event.clientY - y).clampLength(0, travel);
+    knob.style.transform = `translate(calc(-50% + ${stick.x}px), calc(-50% + ${stick.y}px))`;
+    stick.divideScalar(travel);
     if (stick.length() < 0.14) stick.set(0, 0);
   }
   function resetJoystick() {
+    const pointerId = joystickPointer;
     joystickPointer = null;
+    joystickOrigin = null;
+    if (pointerId !== null && joystick.hasPointerCapture(pointerId)) joystick.releasePointerCapture(pointerId);
     stick.set(0, 0);
-    el('stick').style.transform = '';
+    knob.style.transform = '';
+    joystick.dataset.held = 'false';
   }
   joystick.addEventListener('pointerdown', event => {
-    if (joystickPointer !== null) return;
+    if (joystickPointer !== null || event.button !== 0) return;
     event.preventDefault();
+    const rect = joystick.getBoundingClientRect();
+    joystickOrigin = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      travel: Math.max(1, (rect.width - knob.offsetWidth) / 2 - 3),
+    };
     joystickPointer = event.pointerId;
+    joystick.dataset.held = 'true';
     joystick.setPointerCapture(event.pointerId);
     updateJoystick(event);
   });
@@ -289,30 +364,25 @@ function startClassroom() {
     joystick.addEventListener(name, event => { if (joystickPointer === event.pointerId) resetJoystick(); });
   }
 
-  const radius = 0.24;
-  function walkable(x, z) {
-    if (x < -5.6 + radius || x > 5.6 - radius || z < -7.2 + radius || z > 6.5 - radius) return false;
-    return !obstacles.some(item => x > item.minX - radius && x < item.maxX + radius && z > item.minZ - radius && z < item.maxZ + radius);
-  }
-  let last = 0;
+  let last = null;
   renderer.setAnimationLoop(time => {
-    const dt = Math.min((time - last) / 1000, 0.034);
+    const dt = Math.min((time - (last ?? time)) / 1000, 0.05);
     last = time;
     if (active) return;
     const on = key => Number(keys.has(key));
     if (!help.open) {
-      move.set(on('KeyD') - on('KeyA') + stick.x, on('KeyS') - on('KeyW') + stick.y).clampLength(0, 1);
+      move.set(on('KeyD') - on('KeyA') + stick.x, on('KeyW') - on('KeyS') - stick.y).clampLength(0, 1);
       changeLook(on('ArrowRight') - on('ArrowLeft'), on('ArrowDown') - on('ArrowUp'), 1.68 * dt);
-      if (move.lengthSq() > 0) {
-        const cos = Math.cos(yaw), sin = Math.sin(yaw);
-        const step = 2.75 * dt;
-        const dx = (move.x * cos + move.y * sin) * step;
-        const dz = (-move.x * sin + move.y * cos) * step;
-        if (walkable(camera.position.x + dx, camera.position.z)) camera.position.x += dx;
-        if (walkable(camera.position.x, camera.position.z + dz)) camera.position.z += dz;
-      }
+      const sprint = touchSprint || forwardBurst || keys.has('ShiftLeft') || keys.has('ShiftRight');
+      const crouch = keys.has('KeyC');
+      advance(dt, move.x, move.y, yaw, sprint, crouch);
+      eye = THREE.MathUtils.damp(eye, crouch ? 1.29 : 1.62, 18, dt);
     }
+    camera.position.set(player.x, player.height + eye, player.z);
     camera.rotation.set(pitch, yaw, 0);
+    const grounded = String(player.grounded);
+    if (room.dataset.grounded !== grounded) room.dataset.grounded = grounded;
+    if (room.dataset.stride !== player.stride) room.dataset.stride = player.stride;
     updateStation();
     updateLabels();
     renderer.render(scene, camera);

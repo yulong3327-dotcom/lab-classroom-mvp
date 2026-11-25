@@ -30,6 +30,7 @@ jobs:
           ref: 4b5c67d0aa65113d78ac34f8db82a918fdf7bdb2
           path: oxygen-lab-3d
           persist-credentials: false
+      - run: git -C oxygen-lab-3d fetch --no-tags --depth=1 origin 79c3f8fe9d6742225d34ecf16ea062b8b370de42
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -268,7 +268,7 @@ export function createClassroom(scene) {
   };
 
   const obstacles = [];
-  const obstacle = (x, z, w, d) => obstacles.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 });
+  const obstacle = (x, z, w, d, top) => obstacles.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top });
   const storageX = -3.77;
   const storageZ = -6.57;
   box(storageX, 0.48, storageZ, 2.22, 0.9, 0.83, mat.panels).castShadow = true;
@@ -279,7 +279,7 @@ export function createClassroom(scene) {
     box(storageX + dx, 0.73, storageZ + 0.464, 0.19, 0.023, 0.028, mat.steel);
   }
   groundShadow(storageX, storageZ, 2.9, 1.8);
-  obstacle(storageX, storageZ, 2.31, 0.89);
+  obstacle(storageX, storageZ, 2.31, 0.89, 0.984);
 
   function bench(id, x, z) {
     const group = new THREE.Group();
@@ -334,7 +334,7 @@ export function createClassroom(scene) {
       }
     }
     groundShadow(x, z, 4.14, 2.42);
-    obstacle(x, z, w, d);
+    obstacle(x, z, w, d, topY + 0.095 / 2);
     return { id, tabletop, x, z };
   }
 
@@ -354,7 +354,7 @@ export function createClassroom(scene) {
     }
     for (const d of [-0.147, 0.147]) box(0, 0.17, d, 0.312, 0.025, 0.025, mat.frame, group);
     groundShadow(x, z, 0.88, 0.72);
-    obstacle(x, z, 0.46, 0.46);
+    obstacle(x, z, 0.468, 0.468, 0.478 + 0.065 / 2);
   }
 
   const benches = [bench('physics', -2.55, 0.5), bench('chemistry', 2.55, 0.5)];
